@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Texas Hold'em - Mesa (sin cartas)</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 0; padding: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; min-width: 260px; flex: 1; }
+    input, button, select { font-size: 16px; padding: 10px; }
+    button { cursor: pointer; }
+    .muted { color: #666; }
+    .danger { color: #b00020; }
+    .ok { color: #0a7a0a; }
+    .players { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+    .me { border-color: #111; }
+    .turn { outline: 3px solid #111; }
+    .btns { display:flex; gap: 10px; flex-wrap: wrap; }
+    h2,h3 { margin-top: 0; }
+  </style>
+</head>
+<body>
+  <h2>Mesa de Poker (sin cartas)</h2>
+  <p class="muted">Solo apuestas con dinero ficticio. El jugador <b>"jolupa"</b> configura límites y controla mano.</p>
+
+  <div class="row">
+    <div class="card" id="joinCard">
+      <h3>Entrar</h3>
+      <div class="row">
+        <input id="name" placeholder="Tu nombre (ej: jolupa)" />
+      </div>
+      <div style="margin-top:10px" class="btns">
+        <button id="joinBtn">Entrar</button>
+        <button id="leaveBtn" disabled>Salir</button>
+      </div>
+      <p id="msg" class="danger"></p>
+      <p class="muted">Consejo: abre esta misma página desde cada móvil: <b>http://IP_DEL_ORDENADOR:3000</b></p>
+    </div>
+
+    <div class="card">
+      <h3>Mesa</h3>
+      <div><b>Pozo:</b> <span id="pot">0</span></div>
+      <div><b>Apuesta actual:</b> <span id="currentBet">0</span></div>
+      <div><b>Estado mano:</b> <span id="handState">-</span></div>
+      <div class="muted" id="turnInfo"></div>
+      <div class="muted" id="blindInfo"></div>
+    </div>
+
+    <div class="card" id="adminCard" style="display:none">
+      <h3>Admin (jolupa)</h3>
+      <div class="row">
+        <label style="flex:1">Límite por acción<br><input id="betLimit" type="number" min="1"></label>
+        <label style="flex:1">Stack inicial<br><input id="initialStack" type="number" min="1"></label>
+        <label style="flex:1">Ciega pequeña<br><input id="smallBlind" type="number" min="1"></label>
+      </div>
+      <div style="margin-top:10px" class="btns">
+        <button id="saveCfg">Guardar config</button>
+        <button id="resetTable">Reset mesa</button>
+        <button id="startHand">Iniciar mano</button>
+      </div>
+      <div style="margin-top:10px">
+        <b>Asignar ganador:</b>
+        <select id="winnerSelect"></select>
+        <button id="awardWinner">Dar pozo</button>
+      </div>
+      <p class="muted">Cuando la ronda se cierra, el turno queda en “-” hasta que asignes ganador o reinicies.</p>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top: 12px;">
+    <h3>Acciones</h3>
+    <div class="btns">
+      <button id="foldBtn" disabled>Fold</button>
+      <button id="checkCallBtn" disabled>Check / Call</button>
+      <input id="targetTotal" type="number" min="1" placeholder="Total apostado en la ronda (ej: 25)" style="max-width:320px">
+      <button id="betRaiseBtn" disabled>Bet / Raise</button>
+    </div>
+    <p class="muted">“Bet/Raise” envía el <b>total apostado en la ronda</b>. Ej: si llevas 5 y quieres subir a 25, envía 25.</p>
+  </div>
+
+  <h3>Jugadores</h3>
+  <div id="players" class="players"></div>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script>
+    let socket = null;
+    let myId = null;
+    let myName = null;
+    let lastState = null;
+
+    const $ = (id) => document.getElementById(id);
+
+    function setMsg(text, ok=false) {
+      const el = $("msg");
+      el.className = ok ? "ok" : "danger";
+      el.textContent = text || "";
+    }
+
+    function isAdmin() {
+      return (myName || "").toLowerCase() === "jolupa";
+    }
+
+    function render(state) {
+      lastState = state;
+      $("pot").textContent = state.hand.pot;
+      $("currentBet").textContent = state.hand.currentBet;
+      $("handState").textContent = state.hand.inProgress ? "En juego" : "Parada";
+
+      const turnIdx = state.hand.turnIndex;
+      const turnPlayer = turnIdx >= 0 ? state.players[turnIdx] : null;
+      $("turnInfo").textContent = turnPlayer ? `Turno: ${turnPlayer.name}` : "Turno: -";
+
+      const sbIdx = state.hand.smallBlindIndex;
+      const bbIdx = state.hand.bigBlindIndex;
+      const sbName = sbIdx >= 0 ? state.players[sbIdx]?.name : "-";
+      const bbName = bbIdx >= 0 ? state.players[bbIdx]?.name : "-";
+      $("blindInfo").textContent =
+        state.hand.inProgress
+          ? `SB: ${sbName} (${state.config.smallBlind}) • BB: ${bbName} (${state.config.smallBlind * 2})`
+          : `Config: límite ${state.config.betLimit} • stack inicial ${state.config.initialStack} • SB ${state.config.smallBlind}`;
+
+      // Admin panel
+      $("adminCard").style.display = isAdmin() ? "block" : "none";
+      if (isAdmin()) {
+        $("betLimit").value = state.config.betLimit;
+        $("initialStack").value = state.config.initialStack;
+        $("smallBlind").value = state.config.smallBlind;
+
+        const sel = $("winnerSelect");
+        sel.innerHTML = "";
+        for (const p of state.players) {
+          const opt = document.createElement("option");
+          opt.value = p.id;
+          opt.textContent = `${p.name} (stack ${p.stack})`;
+          sel.appendChild(opt);
+        }
+      }
+
+      // Enable/disable actions based on turn
+      const isMyTurn = state.hand.inProgress && turnIdx >= 0 && state.players[turnIdx]?.id === myId;
+      $("foldBtn").disabled = !socket || !isMyTurn;
+      $("checkCallBtn").disabled = !socket || !isMyTurn;
+      $("betRaiseBtn").disabled = !socket || !isMyTurn;
+
+      // Players grid
+      const wrap = $("players");
+      wrap.innerHTML = "";
+      for (let i = 0; i < state.players.length; i++) {
+        const p = state.players[i];
+        const div = document.createElement("div");
+        div.className = "card" +
+          (p.id === myId ? " me" : "") +
+          (i === turnIdx ? " turn" : "");
+
+        const flags = [];
+        if (!p.inHand && state.hand.inProgress) flags.push("foldeado");
+        if (p.betThisRound > 0) flags.push(`apuesta ronda: ${p.betThisRound}`);
+        if (p.hasActed) flags.push("actuó");
+
+        div.innerHTML = `
+          <div><b>${p.name}</b> ${p.id === myId ? "(tú)" : ""}</div>
+          <div>Stack: <b>${p.stack}</b></div>
+          <div class="muted">${flags.join(" • ")}</div>
+        `;
+        wrap.appendChild(div);
+      }
+    }
+
+    $("joinBtn").onclick = () => {
+      const name = $("name").value.trim();
+      if (!name) return setMsg("Pon un nombre.");
+
+      try {
+        socket = io(window.location.origin, { transports: ["websocket", "polling"] });
+
+        socket.on("connect", () => {
+          myId = socket.id;
+          myName = name;
+          socket.emit("join", { name });
+          $("leaveBtn").disabled = false;
+          setMsg("Conectado.", true);
+        });
+
+        socket.on("state", (st) => render(st));
+        socket.on("error_msg", (t) => setMsg(t));
+        socket.on("disconnect", () => {
+          setMsg("Desconectado.");
+          $("leaveBtn").disabled = true;
+          myId = null;
+        });
+      } catch (e) {
+        setMsg("No se pudo conectar.");
+      }
+    };
+
+    $("leaveBtn").onclick = () => {
+      if (socket) {
+        socket.emit("leave");
+        socket.disconnect();
+        socket = null;
+      }
+      $("leaveBtn").disabled = true;
+      setMsg("Saliste.");
+    };
+
+    $("foldBtn").onclick = () => socket?.emit("action_fold");
+    $("checkCallBtn").onclick = () => socket?.emit("action_check_call");
+    $("betRaiseBtn").onclick = () => {
+      const t = Number($("targetTotal").value);
+      if (!Number.isFinite(t) || t <= 0) return setMsg("Cantidad inválida.");
+      socket?.emit("action_bet_raise", { targetTotal: t });
+    };
+
+    // Admin actions
+    $("saveCfg").onclick = () => {
+      if (!isAdmin()) return;
+      socket?.emit("admin_set_config", {
+        betLimit: Number($("betLimit").value),
+        initialStack: Number($("initialStack").value),
+        smallBlind: Number($("smallBlind").value),
+      });
+    };
+    $("resetTable").onclick = () => isAdmin() && socket?.emit("admin_reset_table");
+    $("startHand").onclick = () => isAdmin() && socket?.emit("admin_start_hand");
+    $("awardWinner").onclick = () => {
+      if (!isAdmin()) return;
+      const winnerId = $("winnerSelect").value;
+      socket?.emit("admin_end_hand_award", { winnerId });
+    };
+  </script>
+</body>
+</html>
