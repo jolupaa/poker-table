@@ -30,18 +30,20 @@ const state = {
     initialStack: 500, // initial stack for each player at join (and on reset)
     smallBlind: 5,     // big blind = 2 * smallBlind
   },
-  hand: {
-    inProgress: false,
-    dealerIndex: -1,
-    smallBlindIndex: -1,
-    bigBlindIndex: -1,
-    turnIndex: -1,
+hand: {
+  inProgress: false,
+  street: "PREFLOP",      // PREFLOP | FLOP | TURN | RIVER | SHOWDOWN
+  dealerIndex: -1,
+  smallBlindIndex: -1,
+  bigBlindIndex: -1,
+  turnIndex: -1,
 
-    pot: 0,
-    currentBet: 0,
-    lastAggressorIndex: -1,
-    roundClosed: false,
-  },
+  pot: 0,
+  currentBet: 0,
+  lastAggressorIndex: -1,
+  roundClosed: false,
+  showdownReady: false,   // true cuando se cierra RIVER (o queda 1 jugador)
+},
   players: [], // { id, name, stack, inHand, betThisRound, hasActed }
 };
 
@@ -105,6 +107,7 @@ function resetRoundFlags() {
 
 function resetHandState() {
   state.hand.inProgress = false;
+  state.hand.street = "PREFLOP";
   state.hand.smallBlindIndex = -1;
   state.hand.bigBlindIndex = -1;
   state.hand.turnIndex = -1;
@@ -112,7 +115,52 @@ function resetHandState() {
   state.hand.currentBet = 0;
   state.hand.lastAggressorIndex = -1;
   state.hand.roundClosed = false;
+  state.hand.showdownReady = false;
   resetRoundFlags();
+}
+
+function startBettingRound(firstToActIndex) {
+  // Resetea apuestas de ronda
+  for (const p of state.players) {
+    p.betThisRound = 0;
+    p.hasActed = false;
+  }
+  state.hand.currentBet = 0;
+  state.hand.lastAggressorIndex = -1;
+  state.hand.roundClosed = false;
+  state.hand.turnIndex = firstToActIndex;
+}
+
+function firstToActPostflop() {
+  // En Hold'em postflop actúa primero el primer jugador activo a la izquierda del dealer
+  return nextInHandIndex(state.hand.dealerIndex);
+}
+
+function advanceStreet() {
+  if (!state.hand.inProgress) return;
+
+  if (state.hand.street === "PREFLOP") {
+    state.hand.street = "FLOP";
+    startBettingRound(firstToActPostflop());
+    return;
+  }
+  if (state.hand.street === "FLOP") {
+    state.hand.street = "TURN";
+    startBettingRound(firstToActPostflop());
+    return;
+  }
+  if (state.hand.street === "TURN") {
+    state.hand.street = "RIVER";
+    startBettingRound(firstToActPostflop());
+    return;
+  }
+  if (state.hand.street === "RIVER") {
+    state.hand.street = "SHOWDOWN";
+    state.hand.turnIndex = -1;
+    state.hand.roundClosed = true;
+    state.hand.showdownReady = true;
+    return;
+  }
 }
 
 function canStartHand() {
@@ -145,26 +193,33 @@ function startHand() {
   state.hand.smallBlindIndex = sb;
   state.hand.bigBlindIndex = bb;
 
-  // Reset betting round
-  state.hand.inProgress = true;
-  state.hand.pot = 0;
-  state.hand.currentBet = 0;
-  state.hand.lastAggressorIndex = -1;
-  state.hand.roundClosed = false;
-  resetRoundFlags();
+// Reset mano / calle
+state.hand.inProgress = true;
+state.hand.street = "PREFLOP";
+state.hand.pot = 0;
+state.hand.currentBet = 0;
+state.hand.lastAggressorIndex = -1;
+state.hand.roundClosed = false;
+state.hand.showdownReady = false;
 
-  // Post blinds
-  if (sb >= 0) postBlind(sb, state.config.smallBlind);
-  if (bb >= 0) postBlind(bb, state.config.smallBlind * 2);
+// Reset flags de ronda
+resetRoundFlags();
 
-  // Current bet equals BB
-  state.hand.currentBet = Math.max(
-    state.players[sb]?.betThisRound || 0,
-    state.players[bb]?.betThisRound || 0
-  );
+// Post ciegas
+if (sb >= 0) postBlind(sb, state.config.smallBlind);
+if (bb >= 0) postBlind(bb, state.config.smallBlind * 2);
 
-  // First turn: left of BB
-  state.hand.turnIndex = bb >= 0 ? nextInHandIndex(bb) : -1;
+// Current bet = BB (lo máximo apostado en preflop por ciegas)
+state.hand.currentBet = Math.max(
+  state.players[sb]?.betThisRound || 0,
+  state.players[bb]?.betThisRound || 0
+);
+
+// Marcar hasActed = false para todos; y turno preflop es izquierda de BB
+state.hand.turnIndex = bb >= 0 ? nextInHandIndex(bb) : -1;
+state.hand.roundClosed = false;
+state.hand.lastAggressorIndex = -1;
+
 
   return { ok: true };
 }
@@ -201,19 +256,27 @@ function closeBettingRoundIfNeeded() {
 function advanceTurn() {
   if (!state.hand.inProgress) return;
 
+  // Si queda 1 jugador, ir directo a "SHOWDOWN" (admin reparte bote)
   if (countInHand() <= 1) {
+    state.hand.street = "SHOWDOWN";
     state.hand.turnIndex = -1;
+    state.hand.roundClosed = true;
+    state.hand.showdownReady = true;
     return;
   }
 
   closeBettingRoundIfNeeded();
+
+  // Si se cerró la ronda de apuestas, avanza calle automáticamente
   if (state.hand.roundClosed) {
-    state.hand.turnIndex = -1; // waiting for admin to end hand or continue outside system
+    advanceStreet();
     return;
   }
 
+  // Si no se cerró, avanzar al siguiente jugador activo
   state.hand.turnIndex = nextInHandIndex(state.hand.turnIndex);
 }
+
 
 function assertTurn(socket) {
   const idx = getPlayerIndexById(socket.id);

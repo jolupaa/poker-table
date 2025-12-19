@@ -40,11 +40,14 @@
 
     <div class="card">
       <h3>Mesa</h3>
-      <div><b>Pozo:</b> <span id="pot">0</span></div>
-      <div><b>Apuesta actual:</b> <span id="currentBet">0</span></div>
-      <div><b>Estado mano:</b> <span id="handState">-</span></div>
-      <div class="muted" id="turnInfo"></div>
-      <div class="muted" id="blindInfo"></div>
+<div><b>Pozo:</b> <span id="pot">0</span></div>
+<div><b>Apuesta actual:</b> <span id="currentBet">0</span></div>
+<div><b>Estado mano:</b> <span id="handState">-</span></div>
+<div><b>Calle:</b> <span id="street">-</span></div>
+<div class="muted" id="turnInfo"></div>
+<div class="muted" id="blindInfo"></div>
+<p id="streetNotice" class="ok"></p>
+
     </div>
 
     <div class="card" id="adminCard" style="display:none">
@@ -88,6 +91,8 @@
     let myId = null;
     let myName = null;
     let lastState = null;
+    let lastStreet = null;
+
 
     const $ = (id) => document.getElementById(id);
 
@@ -106,6 +111,27 @@
       $("pot").textContent = state.hand.pot;
       $("currentBet").textContent = state.hand.currentBet;
       $("handState").textContent = state.hand.inProgress ? "En juego" : "Parada";
+      $("street").textContent = state.hand.inProgress ? state.hand.street : "-";
+
+      // Aviso cuando cambia la calle (FLOP / TURN / RIVER / SHOWDOWN)
+if (state.hand.inProgress) {
+  if (lastStreet && lastStreet !== state.hand.street) {
+    const msgMap = {
+      FLOP: "Flop",
+      TURN: "Turn",
+      RIVER: "River",
+      SHOWDOWN: "Showdown: el admin debe asignar ganador"
+    };
+    $("streetNotice").textContent = msgMap[state.hand.street] || "";
+  } else if (!lastStreet) {
+    $("streetNotice").textContent = "";
+  }
+  lastStreet = state.hand.street;
+} else {
+  lastStreet = null;
+  $("streetNotice").textContent = "";
+}
+
 
       const turnIdx = state.hand.turnIndex;
       const turnPlayer = turnIdx >= 0 ? state.players[turnIdx] : null;
@@ -126,6 +152,7 @@
         $("betLimit").value = state.config.betLimit;
         $("initialStack").value = state.config.initialStack;
         $("smallBlind").value = state.config.smallBlind;
+        $("awardWinner").disabled = !state.hand.showdownReady;
 
         const sel = $("winnerSelect");
         sel.innerHTML = "";
@@ -135,6 +162,8 @@
           opt.textContent = `${p.name} (stack ${p.stack})`;
           sel.appendChild(opt);
         }
+    
+
       }
 
       // Enable/disable actions based on turn
